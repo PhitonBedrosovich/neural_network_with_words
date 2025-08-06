@@ -1,0 +1,24 @@
+# Исключение папок с моделью и датасетом
+rubert_tiny_autocomplete_model/
+encoded_dataset/
+
+# Исключение временных файлов Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Исключение виртуального окружения
+.venv/
+venv/
+
+# Исключение системных файлов
+.DS_Store
+Thumbs.db
+
+# Исключение логов и временных файлов
+*.log
+results/
+
+# Исключение файлов .json
+*.json
