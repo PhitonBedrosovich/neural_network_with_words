@@ -22,13 +22,24 @@ except FileNotFoundError:
     print("Файл generated_phrases.txt не найден.")
     exit(1)
 
-# Предобработка
+# Улучшенная предобработка
 phrases = []
 for line in lines:
     line = line.strip().lower()
-    line = re.sub(r'[^\w\s]', '', line)
-    if line:
+    # Сохраняем важную пунктуацию
+    line = re.sub(r'[^\w\s\.\,\!\?]', '', line)
+    # Нормализация пробелов
+    line = re.sub(r'\s+', ' ', line)
+    # Фильтрация по длине и качеству
+    words = line.split()
+    if (line and 
+        len(words) >= 2 and 
+        len(words) <= 8 and  # Ограничиваем длину фраз
+        not any(len(word) == 1 for word in words)):  # Убираем однобуквенные слова
         phrases.append(line)
+
+print("Фраз в датасете:", len(phrases))
+print("Примеры фраз:", phrases[:5])
 
 print("Фраз в датасете:", len(phrases))
 
@@ -41,17 +52,21 @@ except Exception as e:
     print(f"Ошибка токенизатора: {e}")
     exit(1)
 
-# Подготовка данных
+# Улучшенная подготовка данных
 def prepare_data(phrases, max_length):
     inputs = []
     labels = []
+    
     for phrase in phrases:
         words = phrase.split()
-        for i in range(1, len(words)):
+        # Создаем больше обучающих примеров
+        for i in range(1, min(len(words), max_length - 1)):
             input_text = ' '.join(words[:i])
             label = words[i]
             inputs.append(str(input_text))
             labels.append(label)
+    
+    print(f"Создано {len(inputs)} обучающих примеров")
     return Dataset.from_dict({"text": inputs, "label": labels})
 
 try:
@@ -69,11 +84,29 @@ except Exception as e:
 print("Пример данных:", encoded_dataset[0])
 print("Структура датасета:", encoded_dataset.features)
 
-# Словарь меток
+# Улучшенный словарь меток
 try:
-    word_to_index = {word: idx for idx, word in
-                     enumerate(sorted(list(set(' '.join(phrases).split())) + ['<pad>', '<unk>']))}
+    # Собираем все слова и фильтруем их
+    all_words = set()
+    for phrase in phrases:
+        words = phrase.split()
+        all_words.update(words)
+    
+    # Фильтруем слова
+    filtered_words = []
+    for word in sorted(all_words):
+        if (len(word) > 1 and  # Убираем однобуквенные слова
+            word not in ['<pad>', '<unk>'] and
+            not word.isdigit()):  # Убираем числа
+            filtered_words.append(word)
+    
+    # Создаем словарь
+    word_to_index = {word: idx for idx, word in enumerate(['<pad>', '<unk>'] + filtered_words)}
     index_to_word = {idx: word for word, idx in word_to_index.items()}
+    
+    print(f"Создан словарь из {len(word_to_index)} слов")
+    print(f"Примеры слов: {list(word_to_index.keys())[:10]}")
+    
     encoded_dataset = encoded_dataset.map(lambda x: {'label': word_to_index.get(x['label'], word_to_index['<unk>'])})
 except Exception as e:
     print(f"Ошибка при создании словаря меток: {e}")
@@ -103,19 +136,23 @@ except Exception as e:
     print(f"Ошибка загрузки модели: {e}")
     exit(1)
 
-# Аргументы тренировки
+# Улучшенные аргументы тренировки
 training_args = TrainingArguments(
     output_dir='./results',
-    num_train_epochs=3,
-    per_device_train_batch_size=16,
-    per_device_eval_batch_size=16,
-    logging_strategy="steps",  # Включение логирования
-    logging_steps=100,
-    save_total_limit=1,
+    num_train_epochs=5,  # Увеличено количество эпох
+    per_device_train_batch_size=8,  # Уменьшено для стабильности
+    per_device_eval_batch_size=8,
+    logging_strategy="steps",
+    logging_steps=50,  # Более частое логирование
+    save_total_limit=2,  # Сохраняем 2 лучшие модели
     save_strategy="epoch",
     eval_strategy="epoch",
     load_best_model_at_end=True,
-    remove_unused_columns=True,  # Автоматическое удаление ненужных столбцов
+    remove_unused_columns=True,
+    learning_rate=2e-5,  # Добавлен learning rate
+    warmup_steps=100,  # Добавлен warmup
+    weight_decay=0.01,  # Добавлена регуляризация
+    gradient_accumulation_steps=2,  # Для стабильности обучения
 )
 
 # Тренировка
