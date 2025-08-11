@@ -2,9 +2,11 @@ import gc
 import numpy as np
 import re
 import json
+import pandas as pd
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
 from datasets import Dataset
 import torch
+import traceback
 
 # Проверка импорта
 try:
@@ -12,25 +14,50 @@ try:
     print("transformers version:", transformers.__version__)
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
+    traceback.print_exc()
     exit(1)
 
-# Загрузка фраз
+# Загрузка датасета
 try:
-    with open("generated_phrases.txt", "r", encoding="utf-8") as f:
-        lines = f.readlines()
+    df = pd.read_csv("dialogues.tsv", sep="\t", encoding="utf-8")
 except FileNotFoundError:
-    print("Файл generated_phrases.txt не найден.")
+    print("Файл dialogues.tsv не найден.")
+    exit(1)
+except Exception as e:
+    print(f"Ошибка загрузки TSV: {e}")
+    traceback.print_exc()
     exit(1)
 
-# Предобработка
+# Предобработка: извлечение чистых фраз
 phrases = []
-for line in lines:
-    line = line.strip().lower()
-    line = re.sub(r'[^\w\s]', '', line)
-    if line:
-        phrases.append(line)
+for dialogue in df['dialogue']:
+    # Удаляем HTML-теги
+    clean_dialogue = re.sub(r'<[^>]+>', '', dialogue)
+    # Разделяем на строки, игнорируя пустые
+    lines = [line.strip() for line in clean_dialogue.split('\n') if line.strip()]
+    for line in lines:
+        # Проверяем, начинается ли строка с "Пользователь X: "
+        if line.startswith("Пользователь"):
+            # Извлекаем текст после "Пользователь X: "
+            match = re.search(r'Пользователь \d+: (.*?)(?:\s*пользователь\s*|$)', line, re.IGNORECASE)
+            if match:
+                phrase = match.group(1).strip().lower()
+                # Удаляем знаки препинания, оставляем буквы, цифры и пробелы
+                phrase = re.sub(r'[^\w\s]', '', phrase)
+                # Удаляем слово "пользователь" и лишние пробелы
+                phrase = re.sub(r'\bпользователь\b', '', phrase).strip()
+                # Пропускаем пустые фразы
+                if phrase:
+                    phrases.append(phrase)
 
+# Отладочный вывод
 print("Фраз в датасете:", len(phrases))
+print("Примеры фраз:", phrases[:10])
+
+# Проверка кодировки и токенизации фраз
+for i, phrase in enumerate(phrases[:10]):
+    words = phrase.split()
+    print(f"Фраза {i}: {phrase}, слова: {words}")
 
 # Модель и токенизатор
 MODEL_NAME = "cointegrated/rubert-tiny2"
@@ -39,6 +66,7 @@ try:
     print("Токенизатор загружен.")
 except Exception as e:
     print(f"Ошибка токенизатора: {e}")
+    traceback.print_exc()
     exit(1)
 
 # Подготовка данных
@@ -47,8 +75,10 @@ def prepare_data(phrases, max_length):
     labels = []
     for phrase in phrases:
         words = phrase.split()
-        for i in range(1, len(words)):
-            input_text = ' '.join(words[:i])
+        if len(words) < 2:
+            continue
+        for i in range(1, min(len(words), max_length - 1)):
+            input_text = ' '.join(words[max(0, i - (max_length - 2)):i])
             label = words[i]
             inputs.append(str(input_text))
             labels.append(label)
@@ -57,37 +87,76 @@ def prepare_data(phrases, max_length):
 try:
     max_length = 16
     dataset = prepare_data(phrases, max_length)
+    print(f"Датасет подготовлен, размер: {len(dataset)}")
+    if len(dataset) == 0:
+        print("Датасет пустой. Проверьте фразы на наличие хотя бы 2 слов в каждой.")
+        exit(1)
     encoded_dataset = dataset.map(
         lambda x: tokenizer(x['text'], padding='max_length', truncation=True, max_length=max_length),
-        batched=True
+        batched=True,
+        batch_size=256
     )
 except Exception as e:
     print(f"Ошибка при кодировании: {e}")
+    traceback.print_exc()
     exit(1)
-
-# Проверка структуры датасета
-print("Пример данных:", encoded_dataset[0])
-print("Структура датасета:", encoded_dataset.features)
 
 # Словарь меток
 try:
-    word_to_index = {word: idx for idx, word in
-                     enumerate(sorted(list(set(' '.join(phrases).split())) + ['<pad>', '<unk>']))}
+    all_words = set()
+    skipped_words = []
+    for phrase in phrases:
+        words = phrase.split()
+        for word in words:
+            # Фильтруем некорректные слова
+            if re.match(r'^[\W_]+$', word):
+                skipped_words.append((word, "только символы"))
+                continue
+            if len(word) > 50:
+                skipped_words.append((word, "слишком длинное"))
+                continue
+            if re.match(r'^[0-9a-f]{32,}$', word):
+                skipped_words.append((word, "хэш"))
+                continue
+            if word.lower() == 'пользователь' or not word:
+                skipped_words.append((word, "пользователь или пустое"))
+                continue
+            all_words.add(word)
+    word_to_index = {word: idx for idx, word in enumerate(sorted(list(all_words)) + ['<pad>', '<unk>'])}
     index_to_word = {idx: word for word, idx in word_to_index.items()}
-    encoded_dataset = encoded_dataset.map(lambda x: {'label': word_to_index.get(x['label'], word_to_index['<unk>'])})
+    print("Размер словаря:", len(all_words))
+    print("Примеры слов:", sorted(list(all_words))[:20])
+    if skipped_words:
+        print("Пропущенные слова:", skipped_words[:20])
 except Exception as e:
     print(f"Ошибка при создании словаря меток: {e}")
+    traceback.print_exc()
+    exit(1)
+
+# Маппинг меток
+try:
+    def map_labels(example):
+        label = example['label']
+        return {'label': word_to_index.get(label, word_to_index['<unk>'])}
+    encoded_dataset = encoded_dataset.map(map_labels, batched=False)
+except Exception as e:
+    print(f"Ошибка при маппинге меток: {e}")
+    traceback.print_exc()
     exit(1)
 
 # Проверка меток
-for i in range(5):
-    print(f"Пример {i}: text={encoded_dataset[i]['text']}, label={encoded_dataset[i]['label']}, type(label)={type(encoded_dataset[i]['label'])}")
+try:
+    for i in range(min(5, len(encoded_dataset))):
+        label_idx = encoded_dataset[i]['label']
+        label_word = index_to_word.get(label_idx, "<не найдено>")
+        print(f"Пример {i}: text={encoded_dataset[i]['text']}, label_idx={label_idx}, word={label_word}")
+except Exception as e:
+    print(f"Ошибка при проверке меток: {e}")
+    traceback.print_exc()
+    exit(1)
 
 # Удаление ненужного поля text
 encoded_dataset = encoded_dataset.remove_columns(['text'])
-
-# Проверка структуры датасета после удаления
-print("Структура датасета после удаления text:", encoded_dataset.features)
 
 # Сохранение словарей
 with open("word_to_index.json", "w", encoding="utf-8") as f:
@@ -101,6 +170,7 @@ try:
     print("Модель загружена.")
 except Exception as e:
     print(f"Ошибка загрузки модели: {e}")
+    traceback.print_exc()
     exit(1)
 
 # Аргументы тренировки
@@ -109,13 +179,13 @@ training_args = TrainingArguments(
     num_train_epochs=3,
     per_device_train_batch_size=16,
     per_device_eval_batch_size=16,
-    logging_strategy="steps",  # Включение логирования
+    logging_strategy="steps",
     logging_steps=100,
     save_total_limit=1,
     save_strategy="epoch",
     eval_strategy="epoch",
     load_best_model_at_end=True,
-    remove_unused_columns=True,  # Автоматическое удаление ненужных столбцов
+    remove_unused_columns=True,
 )
 
 # Тренировка
@@ -124,13 +194,14 @@ trainer = Trainer(
     args=training_args,
     train_dataset=encoded_dataset,
     eval_dataset=encoded_dataset,
-    processing_class=tokenizer,  # Используем processing_class вместо tokenizer
+    processing_class=tokenizer,
 )
 
 try:
     trainer.train()
 except Exception as e:
     print(f"Ошибка при обучении: {e}")
+    traceback.print_exc()
     exit(1)
 
 # Сохранение
@@ -141,6 +212,7 @@ try:
     print("Модель, токенизатор и датасет сохранены.")
 except Exception as e:
     print(f"Ошибка при сохранении: {e}")
+    traceback.print_exc()
     exit(1)
 
 # Очистка памяти

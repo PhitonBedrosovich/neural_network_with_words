@@ -66,7 +66,7 @@ def get_suggestions(input_text, num_suggestions=3, max_length=16):  # Увели
     return suggestions[:num_suggestions]
 
 # Тест
-input_text = "привет что"
+input_text = "привет"
 suggestions = get_suggestions(input_text)
 print(f"\nВвод: {input_text}")
 print("Подсказки:")
