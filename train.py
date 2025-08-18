@@ -7,10 +7,12 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trai
 from datasets import Dataset
 import torch
 import traceback
+from transliterate import translit  # pip install transliterate
 
 # Проверка импорта
 try:
     import transformers
+
     print("transformers version:", transformers.__version__)
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
@@ -69,6 +71,7 @@ except Exception as e:
     traceback.print_exc()
     exit(1)
 
+
 # Подготовка данных
 def prepare_data(phrases, max_length):
     inputs = []
@@ -83,6 +86,7 @@ def prepare_data(phrases, max_length):
             inputs.append(str(input_text))
             labels.append(label)
     return Dataset.from_dict({"text": inputs, "label": labels})
+
 
 try:
     max_length = 16
@@ -103,17 +107,66 @@ except Exception as e:
 
 # Словарь меток
 try:
+    # Whitelist и blacklist
+    whitelist = {'hello', 'hi', 'ok', 'qq', 'bonjour', 'salam', 'hey', 'yo', 'id', 'end'}
+    blacklist = {'ghbdtn', 'lfdfq', 'plhfdcndeqnt', 'pyfrjvbnmcz', 'zdaрова', 'zdravstvuyte', 'helloy'}
+
+    # Словарь исправлений (расширьте по датасету)
+    corrections = {
+        'ghbdtn': 'привет',
+        'lfdfq': 'давай',
+        'plhfdcndeqnt': 'здравствуйте',
+        'pyfrjvbnmcz': 'познакомимся',
+        'helloy': 'hello',
+        'zdaрова': 'здорова',
+        'zdravstvuyte': 'здравствуйте',
+        'privet': 'привет',
+        'priveet': 'привет',
+        'priivet': 'привет',
+        # Добавьте вариации "привет" из вашего json: 'priiveeet', 'priveeeet' и т.д. → 'привет'
+    }
+
     all_words = set()
     skipped_words = []
+
     for phrase in phrases:
         words = phrase.split()
         for word in words:
-            # Фильтруем некорректные слова
-            if re.match(r'^[\W_]+$', word):
-                skipped_words.append((word, "только символы"))
+            # Нормализация: исправляем известные опечатки
+            word = corrections.get(word.lower(), word.lower())
+
+            # Фильтр для hex-хэшей перед translit
+            if re.match(r'^[0-9a-f]{32,}$', word):
+                skipped_words.append((word, "хэш перед translit"))
+                continue
+
+            # Пытаемся транслитерировать, если нет кириллицы
+            if not re.search(r'[а-яА-Я]', word):
+                try:
+                    word = translit(word, 'ru')
+                except:
+                    pass  # Если не удалось, оставляем как есть
+
+            # Дополнительный фильтр для translit'ированных хэшей (32+ символов из цифр и кириллических a-f эквивалентов)
+            if len(word) >= 32 and re.match(r'^[0-9а-ёА-Ё]{32,}$', word.lower()):
+                skipped_words.append((word, "translited hash"))
+                continue
+
+            # Фильтры (усиленные)
+            if word in blacklist:
+                skipped_words.append((word, "blacklist"))
+                continue
+            if word.isdigit():
+                skipped_words.append((word, "число"))
+                continue
+            if len(word) < 2:
+                skipped_words.append((word, "слишком короткое"))
                 continue
             if len(word) > 50:
                 skipped_words.append((word, "слишком длинное"))
+                continue
+            if re.match(r'^[\W_]+$', word):
+                skipped_words.append((word, "только символы"))
                 continue
             if re.match(r'^[0-9a-f]{32,}$', word):
                 skipped_words.append((word, "хэш"))
@@ -121,10 +174,20 @@ try:
             if word.lower() == 'пользователь' or not word:
                 skipped_words.append((word, "пользователь или пустое"))
                 continue
+            # Пропускать латинские слова, если не в whitelist
+            if not re.search(r'[а-яА-Я]', word) and word not in whitelist:
+                skipped_words.append((word, "латинское без whitelist"))
+                continue
+
             all_words.add(word)
-    word_to_index = {word: idx for idx, word in enumerate(sorted(list(all_words)) + ['<pad>', '<unk>'])}
+
+    # Создание словарей
+    word_to_index = {word: idx for idx, word in enumerate(sorted(list(all_words)))}
+    word_to_index['<pad>'] = len(word_to_index)
+    word_to_index['<unk>'] = len(word_to_index)
     index_to_word = {idx: word for word, idx in word_to_index.items()}
-    print("Размер словаря:", len(all_words))
+
+    print("Размер очищенного словаря:", len(all_words))
     print("Примеры слов:", sorted(list(all_words))[:20])
     if skipped_words:
         print("Пропущенные слова:", skipped_words[:20])
@@ -138,6 +201,8 @@ try:
     def map_labels(example):
         label = example['label']
         return {'label': word_to_index.get(label, word_to_index['<unk>'])}
+
+
     encoded_dataset = encoded_dataset.map(map_labels, batched=False)
 except Exception as e:
     print(f"Ошибка при маппинге меток: {e}")

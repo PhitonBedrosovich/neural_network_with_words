@@ -5,3 +5,5 @@ numpy>=1.21.0
 accelerate>=0.26.0
 flask>=2.0.0
 flask-cors>=4.0.0
+transliterate
+pyaspeller
