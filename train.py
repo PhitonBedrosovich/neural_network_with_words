@@ -12,7 +12,6 @@ from transliterate import translit  # pip install transliterate
 # Проверка импорта
 try:
     import transformers
-
     print("transformers version:", transformers.__version__)
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
@@ -111,7 +110,7 @@ try:
     whitelist = {'hello', 'hi', 'ok', 'qq', 'bonjour', 'salam', 'hey', 'yo', 'id', 'end'}
     blacklist = {'ghbdtn', 'lfdfq', 'plhfdcndeqnt', 'pyfrjvbnmcz', 'zdaрова', 'zdravstvuyte', 'helloy'}
 
-    # Словарь исправлений (расширьте по датасету)
+    # Расширенный словарь исправлений для слипшихся слов (на основе вашего словаря)
     corrections = {
         'ghbdtn': 'привет',
         'lfdfq': 'давай',
@@ -123,7 +122,36 @@ try:
         'privet': 'привет',
         'priveet': 'привет',
         'priivet': 'привет',
-        # Добавьте вариации "привет" из вашего json: 'priiveeet', 'priveeeet' и т.д. → 'привет'
+        'анатолийкак': 'анатолий как',
+        'аптекеехал': 'аптеке ехал',
+        'балеринаи': 'балерина и',
+        'бойсявсе': 'бойся все',
+        'больнице': 'больнице',
+        'вечераммы': 'вечера мы',
+        'вечеркак': 'вечер как',
+        'времяпообщаться': 'время пообщаться',
+        'читаюмного': 'читаю много',
+        'чемзанимаешься': 'чем занимаешься',
+        'физкультпривект': 'физкульт привет',
+        'янкак': 'ян как',
+        'янмне': 'ян мне',
+        'яочень': 'я очень',
+        'ёупривет': 'ёу привет',
+        'хорошая': 'хорошая',  # Если опечатка, исправьте на 'хорошая'
+        'чичотку': 'чичотку',  # Если опечатка, исправьте
+        'утракак': 'утра как',
+        'фотографироваться': 'фотографироваться',  # Оставляем, если нормально
+        'тебязовут': 'тебя зовут',
+        'тебярост': 'тебя рост',
+        # Добавьте больше по мере обнаружения
+    }
+
+    # Базовый список известных слов для проверки разделения (расширьте, если нужно)
+    known_words = {
+        'привет', 'как', 'дела', 'я', 'очень', 'все', 'время', 'пообщаться', 'читаю', 'много', 'хорошая',
+        'анатолий', 'аптеке', 'ехал', 'балерина', 'и', 'бойся', 'вечера', 'мы', 'вечер', 'чем', 'занимаешься',
+        'физкульт', 'ян', 'мне', 'ёу', 'утра', 'фотографироваться', 'тебя', 'зовут', 'рост'
+        # Добавьте распространённые русские слова или из вашего датасета
     }
 
     all_words = set()
@@ -147,10 +175,25 @@ try:
                 except:
                     pass  # Если не удалось, оставляем как есть
 
-            # Дополнительный фильтр для translit'ированных хэшей (32+ символов из цифр и кириллических a-f эквивалентов)
+            # Дополнительный фильтр для translit'ированных хэшей
             if len(word) >= 32 and re.match(r'^[0-9а-ёА-Ё]{32,}$', word.lower()):
                 skipped_words.append((word, "translited hash"))
                 continue
+
+            # Автоматическое разделение слипшихся слов
+            if len(word) > 8 and word not in known_words:  # Только для длинных подозрительных слов
+                for i in range(1, len(word) - 1):
+                    left = word[:i]
+                    right = word[i:]
+                    if left in known_words and right in known_words:
+                        all_words.add(left)
+                        all_words.add(right)
+                        skipped_words.append((word, f"разделено на '{left}' и '{right}'"))
+                        break
+                else:
+                    all_words.add(word)  # Если не удалось разделить, добавляем как есть
+            else:
+                all_words.add(word)
 
             # Фильтры (усиленные)
             if word in blacklist:
@@ -179,8 +222,6 @@ try:
                 skipped_words.append((word, "латинское без whitelist"))
                 continue
 
-            all_words.add(word)
-
     # Создание словарей
     word_to_index = {word: idx for idx, word in enumerate(sorted(list(all_words)))}
     word_to_index['<pad>'] = len(word_to_index)
@@ -201,8 +242,6 @@ try:
     def map_labels(example):
         label = example['label']
         return {'label': word_to_index.get(label, word_to_index['<unk>'])}
-
-
     encoded_dataset = encoded_dataset.map(map_labels, batched=False)
 except Exception as e:
     print(f"Ошибка при маппинге меток: {e}")
